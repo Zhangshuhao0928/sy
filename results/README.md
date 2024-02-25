@@ -22,3 +22,7 @@
    * 训练完成后存储最优实验指标： [best_config.csv](2024-02-22%2006-31-42/best_config.csv)
 
 以上，保证了只要在算力足够的情况表下，可以并行分布式跑大量的实验，从而快速验证效果，***不用担心找不到实验结果～ ^ ^***
+
+<video width="700" height="400" controls>
+    <source src="../pic/fire.mp4" type="video/mp4">
+</video>
