@@ -3,6 +3,42 @@ import torch
 import os
 from torch import nn
 from typing import List, Tuple, Dict, Callable, Any
+from sklearn.model_selection import KFold
+from torch.utils.data import TensorDataset
+
+
+# 用于计算 R² 指标
+def calculate_r_square(pred: torch.Tensor = None, label: torch.Tensor = None) -> float:
+    """
+    @param pred: 预测值
+    @param label: 真实值
+    """
+
+    predictions = pred.cpu().detach()
+    targets = label.cpu().detach()
+
+    dim_1 = predictions.shape[0]
+
+    # 将数据维度重新排列为（batch_size, -1）形状，以便计算每个样本的R平方
+    predictions_flat = predictions.view(dim_1, -1)
+    targets_flat = targets.view(dim_1, -1)
+
+    # 计算每个样本的平均值
+    mean_targets = torch.mean(targets_flat, dim=1, keepdim=True)
+
+    # 计算总平方和（Total Sum of Squares, TSS）
+    TSS = torch.sum((targets_flat - mean_targets) ** 2, dim=1)
+
+    # 计算残差平方和（Residual Sum of Squares, RSS）
+    RSS = torch.sum((targets_flat - predictions_flat) ** 2, dim=1)
+
+    # 计算每个样本的R平方
+    R_squared = 1 - (RSS / TSS)
+
+    # 对R平方进行求均值，得到整体的R平方值
+    overall_R_squared = torch.mean(R_squared)
+
+    return overall_R_squared.item()
 
 
 # 创建 metric list
@@ -67,6 +103,7 @@ def epoch(scope: Dict, loader, on_batch: Any = None, training: bool = False) -> 
     # 生成用于记录各指标值的字典
     metrics_list = generate_metrics_list(metrics_def)
     total_loss = 0
+    r = 0
 
     # 将模型切换到训练或验证模式
     if training:
@@ -76,6 +113,7 @@ def epoch(scope: Dict, loader, on_batch: Any = None, training: bool = False) -> 
 
     # 遍历数据加载器中的每个 batch，这里分 batch 的时候，如果最后剩下不满足一个 batch_size 大小的数据的话
     # 会直接用一个小 batch，而非凑够 batch_size
+    cnt = 0
     for batch in loader:
         # 如果定义了 process_batch 函数，对数据进行处理, 目前没定义
         if "process_batch" in scope and scope["process_batch"] is not None:
@@ -88,6 +126,8 @@ def epoch(scope: Dict, loader, on_batch: Any = None, training: bool = False) -> 
         # 计算模型输出和损失，注意这里的 loss 是一整个 batch 上累加的 loss
         loss, output = loss_func(model, batch)
 
+        r_batch = calculate_r_square(output, batch[1])
+
         # 如果是训练阶段，进行反向传播和优化器更新
         if training:
             optimizer.zero_grad()
@@ -96,6 +136,8 @@ def epoch(scope: Dict, loader, on_batch: Any = None, training: bool = False) -> 
 
         # 累计总损失值
         total_loss += loss.item()
+        r += r_batch
+        cnt += 1
 
         # 将当前 batch 的信息添加到 scope 中
         scope["batch"] = batch
@@ -125,22 +167,27 @@ def epoch(scope: Dict, loader, on_batch: Any = None, training: bool = False) -> 
         scope["list"] = scope["metrics_list"][name]
         metrics[name] = metrics_def[name]["on_epoch"](scope)
 
+    # loss = total_loss / cnt
+    r /= cnt
+
     # print('metric:', metrics)
     # 返回总损失值和最终的 metrics 字典
-    return total_loss, metrics
+    return total_loss, metrics, r
 
 
-def train(scope: Dict, train_dataset, val_dataset, patience: int = 10, batch_size: int = 256, print_function=print,
+def train(scope: Dict, train_dataset, test_dataset, patience: int = 10, batch_size: int = 256, print_function=print,
           eval_model=None, on_train_batch=None, on_val_batch=None, on_train_epoch=None, on_val_epoch=None,
           after_epoch=None, save_model: Any = None, all_path: Dict = None, test_model: Any = None,
-          test_interval: int = None) -> Tuple:
+          test_interval: int = None, warm_up: Any = None, lr_decay: Any = None) -> Tuple:
     """
+    @param lr_decay: 学习率衰减函数
+    @param warm_up: 学习率预热函数
     @param test_interval: 测试间隔
     @param test_model: 测试模型函数
     @param all_path: 全部用到的存储路径
     @param scope: 包含各种训练参数的字典
     @param train_dataset: 训练集
-    @param val_dataset: 验证集（目前就是测试集））
+    @param test_dataset: 测试集
     @param patience: 忍耐值，目前没使用
     @param batch_size: 批数据大小
     @param print_function: 输出函数，实际上就是 print...
@@ -156,98 +203,217 @@ def train(scope: Dict, train_dataset, val_dataset, patience: int = 10, batch_siz
 
     # 从字典中取出相应参数，方便使用
     epochs = scope["epochs"]
+    normal_epochs = scope["normal_epochs"]
+    warm_up_iter = scope["warm_up_iter"]
     model = scope["model"]
     metrics_def = scope["metrics_def"]
+    num_folds = scope["kf"]
+    mode = scope["mode"]
 
     # 新定义 5 个 key 值用于记录最优参数
     scope["best_train_metric"] = None
     scope["best_train_loss"] = float("inf")
-    scope["best_val_metrics"] = None
-    scope["best_val_loss"] = float("inf")
+    scope["best_test_metrics"] = None
+    scope["best_test_loss"] = float("inf")
     scope["best_model"] = None
+    scope["r"] = None
 
-    # 创建 dataloader 自动输出批量数据用于训练
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    k_fold = KFold(n_splits=num_folds, shuffle=True)
+    per_fold_epochs = epochs // num_folds
+    fold_cre_epoch = 0
+    for fold, (train_indices, val_indices) in enumerate(k_fold.split(train_dataset[0])):
 
-    # 从 1 开始，方便理解，否则默认是从 0 开始的
-    best_epoch = 0
-    for epoch_id in range(1, epochs + 1):
-        # 记录当前训练的轮次数
-        scope["epoch"] = epoch_id
-        print_function("Epoch #" + str(epoch_id))
+        train_dataset_in = TensorDataset(train_dataset[0][train_indices], train_dataset[1][train_indices])
+        val_dataset_in = TensorDataset(train_dataset[0][val_indices], train_dataset[1][val_indices])
 
-        # Training
-        scope["dataset"] = train_dataset  # 用于计算 mse_on_epoch 指标
-        # 运行当前 epoch 训练，返回的 train_loss 是一个 total_loss
-        train_loss, train_metrics = epoch(scope, train_loader, on_train_batch, training=True)
-        # 记录当前 epoch 的损失以及其他指标
-        scope["train_loss"] = train_loss
-        scope["train_metrics"] = train_metrics
-        print_function("\tTrain Loss = " + str(train_loss))
-        for name in metrics_def.keys():
-            print_function("\tTrain " + metrics_def[name]["name"] + " = " + str(train_metrics[name]))
-        if on_train_epoch is not None:
-            on_train_epoch(scope)
-        del scope["dataset"]
+        # 创建数据加载器
+        train_loader = torch.utils.data.DataLoader(train_dataset_in, batch_size=batch_size, shuffle=True)
+        val_loader = torch.utils.data.DataLoader(val_dataset_in, batch_size=batch_size, shuffle=True)
+        test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-        # Validation
-        # 现在的逻辑是每次训练之后都验证一次，但是这里的验证集就是测试集 多少还是不太合理
-        scope["dataset"] = val_dataset
-        # 不计算梯度，不进行模型更新
-        with torch.no_grad():
-            val_loss, val_metrics = epoch(scope, val_loader, on_val_batch, training=False)
-        scope["val_loss"] = val_loss
-        scope["val_metrics"] = val_metrics
-        print_function("\tVal Loss = " + str(val_loss))
-        for name in metrics_def.keys():
-            print_function("\tVal " + metrics_def[name]["name"] + " = " + str(val_metrics[name]))
-        if on_val_epoch is not None:
-            on_val_epoch(scope)
-        del scope["dataset"]
+        # 从 1 开始，方便理解，否则默认是从 0 开始的
+        best_epoch = 0
+        for epoch_id in range(1, per_fold_epochs + 1):
+            current_epoch = epoch_id + fold_cre_epoch
+            # 记录当前训练的轮次数
+            scope["epoch"] = current_epoch
+            print_function("Epoch #" + str(current_epoch))
 
-        # Selection the best metric
-        # 目前也是一次训练之后就选择一次最优指标
-        is_best = None
-        if eval_model is not None:
-            is_best = eval_model(scope)
-        if is_best is None:
-            is_best = val_loss < scope["best_val_loss"]
-        # 只要当前模型的 val loss 更小，则更新最优指标
-        if is_best:
-            scope["best_train_metric"] = train_metrics
-            scope["best_train_loss"] = train_loss
-            scope["best_val_metrics"] = val_metrics
-            scope["best_val_loss"] = val_loss
-            scope["best_model"] = copy.deepcopy(model)
-            best_epoch = epoch_id
+            # Training
+            scope["dataset"] = train_dataset_in  # 用于计算 mse_on_epoch 指标
+            # 运行当前 epoch 训练，返回的 train_loss 是一个 total_loss
+            train_loss, train_metrics, _ = epoch(scope, train_loader, on_train_batch, training=True)
+            # 记录当前 epoch 的损失以及其他指标
+            scope["train_loss"] = train_loss
+            scope["train_metrics"] = train_metrics
+            print_function("\tTrain Loss = " + str(train_loss))
+            for name in metrics_def.keys():
+                print_function("\tTrain " + metrics_def[name]["name"] + " = " + str(train_metrics[name]))
+            if on_train_epoch is not None:
+                on_train_epoch(scope)
+            del scope["dataset"]
 
-            print_function("Best model has been selected !")
+            # Validation
+            scope["dataset"] = val_dataset_in
+            # 不计算梯度，不进行模型更新
+            with torch.no_grad():
+                val_loss, val_metrics, _ = epoch(scope, val_loader, on_val_batch, training=False)
+            scope["val_loss"] = val_loss
+            scope["val_metrics"] = val_metrics
+            print_function("\tVal Loss = " + str(val_loss))
+            for name in metrics_def.keys():
+                print_function("\tVal " + metrics_def[name]["name"] + " = " + str(val_metrics[name]))
+            if on_val_epoch is not None:
+                on_val_epoch(scope)
+            del scope["dataset"]
 
-        # 这里是每个 epoch 记录一次
-        if after_epoch is not None:
-            after_epoch(scope=scope, epoch_id=epoch_id)
+            # Test
+            scope["dataset"] = test_dataset
+            # 不计算梯度，不进行模型更新
+            with torch.no_grad():
+                test_loss, test_metrics, r = epoch(scope, test_loader, None, training=False)
+            scope["test_loss"] = test_loss
+            scope["test_metrics"] = test_metrics
+            scope["r"] = r
+            print_function("\tTest Loss = " + str(test_loss))
+            for name in metrics_def.keys():
+                print_function("\tTest " + metrics_def[name]["name"] + " = " + str(test_metrics[name]))
+            if on_val_epoch is not None:
+                on_val_epoch(scope)
+            del scope["dataset"]
 
-        # 存储模型并且进行测试
-        if epoch_id % test_interval == 0:
-            # 保存模型状态
-            if save_model is not None:
-                save_path = all_path['saved_models']
-                save_model(scope, epoch_id, save_path)
-            if test_model is not None:
-                test_model(model, epoch_id)
+            # Selection the best metric
+            # 目前也是一次训练之后就选择一次最优指标
+            is_best = None
+            if eval_model is not None:
+                is_best = eval_model(scope)
+            if is_best is None:
+                is_best = test_loss < scope["best_test_loss"]
+            # 只要当前模型的 test loss 更小，则更新最优指标
+            if is_best:
+                scope["best_train_metric"] = train_metrics
+                scope["best_train_loss"] = train_loss
+                scope["best_test_metrics"] = test_metrics
+                scope["best_test_loss"] = test_loss
+                scope["best_model"] = copy.deepcopy(model)
+                best_epoch = current_epoch
 
+                print_function("Best model has been selected !")
+
+            if mode == 'sy':
+                if current_epoch <= warm_up_iter:
+                    warm_up(current_epoch)
+                elif current_epoch > normal_epochs:
+                    lr_decay(current_epoch)
+
+            # 这里是每个 epoch 记录一次
+            if after_epoch is not None:
+                after_epoch(scope=scope, epoch_id=current_epoch, test_mode=True)
+
+            # 存储模型并且进行测试
+            if current_epoch % test_interval == 0:
+                # 保存模型状态
+                if save_model is not None:
+                    save_path = all_path['saved_models']
+                    save_model(scope, current_epoch, save_path)
+                if test_model is not None:
+                    test_model(model, current_epoch)
+
+        fold_cre_epoch += per_fold_epochs
+
+    # # 创建 dataloader 自动输出批量数据用于训练
+    # train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    # test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    #
+    # # 从 1 开始，方便理解，否则默认是从 0 开始的
+    # best_epoch = 0
+    # for epoch_id in range(1, epochs + 1):
+    #     # 记录当前训练的轮次数
+    #     scope["epoch"] = epoch_id
+    #     print_function("Epoch #" + str(epoch_id))
+    #
+    #     # Training
+    #     scope["dataset"] = train_dataset  # 用于计算 mse_on_epoch 指标
+    #     # 运行当前 epoch 训练，返回的 train_loss 是一个 total_loss
+    #     train_loss, train_metrics = epoch(scope, train_loader, on_train_batch, training=True)
+    #     # 记录当前 epoch 的损失以及其他指标
+    #     scope["train_loss"] = train_loss
+    #     scope["train_metrics"] = train_metrics
+    #     print_function("\tTrain Loss = " + str(train_loss))
+    #     for name in metrics_def.keys():
+    #         print_function("\tTrain " + metrics_def[name]["name"] + " = " + str(train_metrics[name]))
+    #     if on_train_epoch is not None:
+    #         on_train_epoch(scope)
+    #     del scope["dataset"]
+    #
+    #     # Test
+    #     # 现在的逻辑是每次训练之后都验证一次，但是这里的验证集就是测试集 多少还是不太合理
+    #     scope["dataset"] = test_dataset
+    #     # 不计算梯度，不进行模型更新
+    #     with torch.no_grad():
+    #         test_loss, test_metrics = epoch(scope, test_loader, on_val_batch, training=False)
+    #     scope["test_loss"] = test_loss
+    #     scope["test_metrics"] = test_metrics
+    #     print_function("\tTest Loss = " + str(test_loss))
+    #     for name in metrics_def.keys():
+    #         print_function("\tTest " + metrics_def[name]["name"] + " = " + str(test_metrics[name]))
+    #     if on_val_epoch is not None:
+    #         on_val_epoch(scope)
+    #     del scope["dataset"]
+    #
+    #     # Selection the best metric
+    #     # 目前也是一次训练之后就选择一次最优指标
+    #     is_best = None
+    #     if eval_model is not None:
+    #         is_best = eval_model(scope)
+    #     if is_best is None:
+    #         is_best = test_loss < scope["best_test_loss"]
+    #     # 只要当前模型的 test loss 更小，则更新最优指标
+    #     if is_best:
+    #         scope["best_train_metric"] = train_metrics
+    #         scope["best_train_loss"] = train_loss
+    #         scope["best_test_metrics"] = test_metrics
+    #         scope["best_test_loss"] = test_loss
+    #         scope["best_model"] = copy.deepcopy(model)
+    #         best_epoch = epoch_id
+    #
+    #         print_function("Best model has been selected !")
+    #
+    #     if epoch_id <= warm_up_iter:
+    #         warm_up(epoch_id)
+    #     elif epoch_id > normal_epochs:
+    #         lr_decay(epoch_id)
+    #
+    #     # 这里是每个 epoch 记录一次
+    #     if after_epoch is not None:
+    #         after_epoch(scope=scope, epoch_id=epoch_id)
+    #
+    #     # 存储模型并且进行测试
+    #     if epoch_id % test_interval == 0:
+    #         # 保存模型状态
+    #         if save_model is not None:
+    #             save_path = all_path['saved_models']
+    #             save_model(scope, epoch_id, save_path)
+    #         if test_model is not None:
+    #             test_model(model, epoch_id)
 
     return scope["best_model"], scope["best_train_metric"], scope["best_train_loss"], \
-        scope["best_val_metrics"], scope["best_val_loss"], best_epoch
+        scope["best_test_metrics"], scope["best_test_loss"], best_epoch
 
 
 def train_model(model: nn.Module, loss_func, train_dataset, val_dataset, optimizer, process_batch=None,
                 eval_model: nn.Module = None, on_train_batch: Any = None, on_val_batch: Any = None,
                 on_train_epoch: Any = None, on_val_epoch: Any = None, after_epoch: Any = None,
-                epochs: int = 100, batch_size: int = 256, patience: int = 10, device=0, all_path: Dict = None,
-                test_model: Any = None, test_interval: int = None, **kwargs) -> Any:
+                epochs: int = 100, normal_epochs: int = 100, warm_up_iter: int = 20, batch_size: int = 256,
+                patience: int = 10, device=0, all_path: Dict = None, test_model: Any = None, test_interval: int = None,
+                warm_up: Any = None, lr_decay: Any = None, kf: int = None, mode: str = None, **kwargs) -> Any:
     """
+    @param mode: 模型选择
+    @param kf: k-折交叉验证
+    @param lr_decay: 学习率衰减函数
+    @param warm_up: 学习率预热函数
+    @param warm_up_iter: 学习率预热轮次
+    @param normal_epochs: 峰值训练轮次
     @param test_interval: 测试间隔
     @param test_model: 测试模型函数
     @param all_path: 全部用到的存储路径
@@ -275,7 +441,7 @@ def train_model(model: nn.Module, loss_func, train_dataset, val_dataset, optimiz
     # 定义参数字典 scope
     scope = {"model": model, "loss_func": loss_func, "train_dataset": train_dataset, "val_dataset": val_dataset,
              "optimizer": optimizer, "process_batch": process_batch, "epochs": epochs, "batch_size": batch_size,
-             "device": device}
+             "device": device, "warm_up_iter": warm_up_iter, "normal_epochs": normal_epochs, "kf": kf, "mode": mode}
 
     # 存储 names 中 存储的 name 相关的参数字典
     metrics_def = {}
@@ -306,4 +472,5 @@ def train_model(model: nn.Module, loss_func, train_dataset, val_dataset, optimiz
     return train(scope, train_dataset, val_dataset, eval_model=eval_model, on_train_batch=on_train_batch,
                  on_val_batch=on_val_batch, on_train_epoch=on_train_epoch, on_val_epoch=on_val_epoch,
                  after_epoch=after_epoch, batch_size=batch_size, patience=patience, save_model=save_model,
-                 all_path=all_path, test_model=test_model, test_interval=test_interval)
+                 all_path=all_path, test_model=test_model, test_interval=test_interval, warm_up=warm_up,
+                 lr_decay=lr_decay)

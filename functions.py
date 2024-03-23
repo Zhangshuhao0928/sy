@@ -41,8 +41,9 @@ def initialize(model: nn.Module, gain: int = 1, std: float = 0.02) -> None:
 
 # 数据可视化函数
 def visualize(sample_y: np.array = None, out_y: np.array = None, error: np.array = None, epoch_id: int = None,
-              all_path: Dict = None) -> None:
+              all_path: Dict = None, test_interval: int = None) -> None:
     """
+    @param test_interval: 测试间隔
     @param sample_y: 测试数据的 label
     @param out_y: 模型输出的预测结果
     @param error: sample_y 和 out_y 的绝对差值
@@ -166,6 +167,14 @@ def visualize(sample_y: np.array = None, out_y: np.array = None, error: np.array
 
             # 计算真实值和预测值之间的速度模误差
             error_speed = abs(speed - speed_pred)  # (50, 250)
+
+            eps = 1e-5
+            speed_pred_for_no_zero = speed_pred + eps
+            error_relative = error_speed / speed_pred_for_no_zero
+
+            np.savetxt(plot_path + '/' + f"absolute_error_epoch{epoch_id}_dimension{i}.csv", error_speed)
+            np.savetxt(plot_path + '/' + f"relative_error_epoch{epoch_id}_dimension{i}.csv", error_relative)
+
             mine = np.min(error_speed)
             maxe = np.max(error_speed)
 
@@ -196,7 +205,7 @@ def visualize(sample_y: np.array = None, out_y: np.array = None, error: np.array
             # 存储 dat 文件
             error_speed = error_speed.reshape(250, 50)
 
-            if epoch_id == 300:
+            if epoch_id == test_interval:
                 # Save test data
                 HEADER = "TITLE = \"plot\"\nVARIABLES = \"X\",\"Y\",\"U\",\"V\",\"error\"\nZONE I=250, J=50, F=POINT"
                 # 切分为 ux 和 uy 两个数组
@@ -206,7 +215,7 @@ def visualize(sample_y: np.array = None, out_y: np.array = None, error: np.array
                 # 按列堆叠数组的函数, 将一系列一维数组作为列堆叠成一个二维数组
                 # 每一列的 shape 都是（50*250，），一共有 5 列
                 data = np.column_stack((X.flatten(), Y.flatten(), *channel_test_v_flat, error_speed.flatten()))
-                np.savetxt(dat_path + '/' + f"true_epoch{epoch_id}_dimension{i}.dat", data, delimiter="\t",
+                np.savetxt(dat_path + '/' + f"true_dimension{i}.dat", data, delimiter="\t",
                            header=HEADER, comments='')
 
             # Save pred data
@@ -228,7 +237,7 @@ def plot_curves(curves: Dict = None, progress_path: str = None) -> None:
     # 当前已经训练的 epoch 数目
     cur_epoch = [i for i in range(1, len(curves["train_loss_curve"]) + 1)]
     # 大图对象 fig 以及子图对象 ax
-    fig, ax = plt.subplots(2, 4, figsize=(30, 12))
+    fig, ax = plt.subplots(3, 4, figsize=(45, 20))
 
     # 精简代码，避免重复代码累赘
     def avoid_duplicate(axis=None, curve_name: str = None) -> None:
@@ -243,21 +252,43 @@ def plot_curves(curves: Dict = None, progress_path: str = None) -> None:
         axis.set_xlabel("epoch", fontsize=15)
         axis.set_ylabel(y_label, fontsize=15)
         axis.set_title(curve_name, fontsize=20)
-        axis.grid(linestyle='-.', linewidth=0.6)
+        # axis.grid(linestyle='-.', linewidth=0.6)
 
-    i, j = 0, 0
+    i, j, k = 0, 0, 0
+    cnt = 0
+    r_name, r_val = None, None
     for curve_name, curve_value in curves.items():
+        if cnt == 12:
+            r_name, r_val = curve_name, curve_value
+            break
+
         if i < 4:
             ax[0][i].plot(cur_epoch, curve_value)
             avoid_duplicate(ax[0][i], curve_name)
             i += 1
-        else:
+        elif j < 4:
             ax[1][j].plot(cur_epoch, curve_value)
             avoid_duplicate(ax[1][j], curve_name)
             j += 1
+        else:
+            ax[2][k].plot(cur_epoch, curve_value)
+            avoid_duplicate(ax[2][k], curve_name)
+            k += 1
+
+        cnt += 1
 
     plt.tight_layout()
     plot_curve_path = progress_path + '/' + 'all_curves.png'
     plt.savefig(plot_curve_path)
     print('All curves has been ploted in {}'.format(plot_curve_path))
+    plt.close()
+
+    plt.figure()
+    plt.plot(cur_epoch, r_val)
+    plt.xlabel('epoch')
+    plt.ylabel('R²')
+    plt.title('R_square')
+    plt.tight_layout()
+    r_curve_path = progress_path + '/' + 'r_square.png'
+    plt.savefig(r_curve_path)
     plt.close()

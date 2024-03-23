@@ -133,8 +133,8 @@ def process() -> None:
             # 扩充维度，将原本的(2, 50, 250) 扩充为 (201, 2, 50, 250) 这里可以理解为复制，即 201个三维数组是一模一样的
             input_sdf_feats = np.tile(sdf_array, [201, 1, 1, 1])
 
-            # selected_feats = [input_sdf_feats, init_feats_array]
-            selected_feats = [input_sdf_feats]
+            selected_feats = [input_sdf_feats, init_feats_array]
+            # selected_feats = [input_sdf_feats]
             # 在第一个维度进行拼接 数据的形式是：原本的两个 sdf 的数据 + init_u + 等差数列中的数（+的意思是拼接 不是加法）
             input_feats = np.concatenate(selected_feats, axis=1)  # (201, 4, 50, 250)
             # print("input_feats.shape: {} ".format( input_feats.shape )) # input_feats.shape: (201, 4, 50, 250)
@@ -185,10 +185,10 @@ def process() -> None:
     data_x = data_x.astype(np.float32)
     data_y = data_y.astype(np.float32)
 
-    # min-max scaler  归一化操作 将所有的数都放缩到 0～1 之间，之前的原始数据中会有负数
-    data_x_max, data_x_min, data_y_max, data_y_min = data_x.max(), data_x.min(), data_y.max(), data_y.min()
-    data_x = (data_x - data_x_min) / (data_x_max - data_x_min)
-    data_y = (data_y - data_y_min) / (data_y_max - data_y_min)
+    # # min-max scaler  归一化操作 将所有的数都放缩到 0～1 之间，之前的原始数据中会有负数
+    # data_x_max, data_x_min, data_y_max, data_y_min = data_x.max(), data_x.min(), data_y.max(), data_y.min()
+    # data_x = (data_x - data_x_min) / (data_x_max - data_x_min)
+    # data_y = (data_y - data_y_min) / (data_y_max - data_y_min)
 
     # 0.8 即 1/4 用于制作测试集
     ratio = 0.8
@@ -209,10 +209,10 @@ def process() -> None:
     test_x = data_x[train_size:]
     test_y = data_y[train_size:]
 
-    np.save(os.path.join(save_path, "train_x_2.npy"), train_x)
-    np.save(os.path.join(save_path, "train_y_2.npy"), train_y)
-    np.save(os.path.join(save_path, "test_x_2.npy"), test_x)
-    np.save(os.path.join(save_path, "test_y_2.npy"), test_y)
+    np.save(os.path.join(save_path, "train_x_shuffle.npy"), train_x)
+    np.save(os.path.join(save_path, "train_y_shuffle.npy"), train_y)
+    np.save(os.path.join(save_path, "test_x_shuffle.npy"), test_x)
+    np.save(os.path.join(save_path, "test_y_shuffle.npy"), test_y)
     print('train_x:', train_x.shape)
     print('train_y:', train_y.shape)
     print('test_x:', test_x.shape)
