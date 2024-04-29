@@ -355,13 +355,17 @@ def main():
     loss_fn2 = torch.nn.SmoothL1Loss(reduce=True, reduction='mean')
     optimizer = Adam(model.parameters(), lr=5e-4)
 
-    early_stop_steps = 50000  # 当评估指标经过一定 steps 优化后不再提升的最大 step
     evaluate_per_steps = 200  # 每隔 x 个 step 评估一次
     best_metric_steps = 0  # 当前最优参数的 step 数, 这个会一直累加，不会因为更换 epoch 而清零
     best_metric = 1000000.0  # 设置初始值；当前最优 loss
 
     best_metric_list = []
-    # stop_training = False
+    # 用于早停
+    stop_training = False
+    cnt = 0
+    res = 0
+    best_ep = 0
+    signal = True
 
     epoch = 1000
     steps = 0
@@ -392,19 +396,27 @@ def main():
                 if test_loss < best_metric:
                     best_metric = test_loss  # 比较，选取最优 loss
                     best_metric_steps = steps
+                    best_ep = ep
                     best_metric_list.append(best_metric)
                     save_file_path = os.path.join(save_path, "saved_model_step{}.pt".format(best_metric_steps))
                     torch.save(model.state_dict(), save_file_path)
                     print("best_step: {}; best_test_loss: {:.6f}".format(best_metric_steps, best_metric))
 
-        #     # 判断是否早停
-        #     if steps - best_metric_steps >= early_stop_steps:
-        #         # stop training
-        #         stop_training = True
-        #         break
-        #
-        # if stop_training:
-        #     break
+        # 判断是否早停
+        if ep - best_ep >= 100 and signal:
+            # stop training
+            stop_training = True
+            # 计算跟 100 的整数倍还差多少
+            res = 100 - ep % 100
+            # 防止后面继续增加计数器 所以置为 False 不进入这个 if
+            signal = False
+
+        if stop_training:
+            # 计数器
+            cnt += 1
+            # 跑完 res 个 epoch  早停
+            if cnt == res:
+                break
 
     return best_metric_steps, progress_path, label_type
 

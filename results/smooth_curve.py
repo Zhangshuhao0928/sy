@@ -10,7 +10,9 @@ import pandas as pd
 from scipy.signal import savgol_filter
 
 # 路径
-path = "./TCNN"
+path = "./UNET"
+dir_path = os.path.join(path, '10-7-650-no')
+os.makedirs(dir_path, exist_ok=True)
 data_path = os.path.join(path, 'curves.csv')
 
 # 加载数据
@@ -33,7 +35,7 @@ col = ['Epoch',
        'r_squre']
 
 for i in range(len(col)):
-    COL = col[1]
+    COL = col[i]
     # 把 loss 拿出来
     loss = data[COL].tolist()
 
@@ -43,23 +45,30 @@ for i in range(len(col)):
     polyorder = 1
 
     # 平滑函数  loss 是数据  window_len 是窗口长度
-    loss_smooth = savgol_filter(loss, window_len, polyorder, mode='nearest')
+    # loss_smooth = savgol_filter(loss, window_len, polyorder, mode='nearest')
 
-    plt.figure(figsize=(10, 8))
+    plt.figure(figsize=(10, 7), dpi=650)
 
-    plt.plot(loss_smooth, color='cornflowerblue', linewidth=1.5, label=COL)
+    plt.plot(loss, color='cornflowerblue', linewidth=1.5, label=COL)
 
     # 罗马字体
-    # plt.rcParams['font.family'] = 'Times New Roman'
-    # 小五号 就是 10
-    plt.rcParams['font.size'] = 10
-    plt.xlabel('epoch')
+    plt.rcParams['font.family'] = 'Times New Roman'
+    # # 小五号 就是 10
+    plt.rcParams['font.size'] = 28
+
+
+    # # 下面这几行代码是用于控制是否添加 times roman 的
+    plt.xlabel('Epoch')
     y_label = '_'.join(COL.split(' '))
     plt.ylabel(y_label)
-    plt.legend()
+
+    # plt.legend()
     plt.title(COL)
-    save_path = os.path.join(path, COL)
-    plt.savefig(save_path + '.png')
-    plt.show()
+
+    plt.tight_layout()
+    if i != 0:
+        save_path = os.path.join(dir_path, COL)
+        plt.savefig(save_path + '.png')
+        plt.show()
 
 # 爱心发射❤️，biu～ 哈哈哈哈哈哈哈 啦啦啦

@@ -72,7 +72,6 @@ def read_sdf_file(file_path: str) -> np.array:
                 line_array = []
     # 转换为数组
     data_array = np.asarray(data_list, dtype=np.float32)  # (50, 250)
-
     return data_array
 
 
@@ -209,10 +208,10 @@ def process() -> None:
     test_x = data_x[train_size:]
     test_y = data_y[train_size:]
 
-    np.save(os.path.join(save_path, "train_x_shuffle.npy"), train_x)
-    np.save(os.path.join(save_path, "train_y_shuffle.npy"), train_y)
-    np.save(os.path.join(save_path, "test_x_shuffle.npy"), test_x)
-    np.save(os.path.join(save_path, "test_y_shuffle.npy"), test_y)
+    # np.save(os.path.join(save_path, "train_x_shuffle.npy"), train_x)
+    # np.save(os.path.join(save_path, "train_y_shuffle.npy"), train_y)
+    # np.save(os.path.join(save_path, "test_x_shuffle.npy"), test_x)
+    # np.save(os.path.join(save_path, "test_y_shuffle.npy"), test_y)
     print('train_x:', train_x.shape)
     print('train_y:', train_y.shape)
     print('test_x:', test_x.shape)
@@ -243,7 +242,7 @@ def plot_demo(true_v: np.array, save_fig: str, shape: List = [25, 5], min_max_v:
             'levels': np.linspace(min_max_v[0], min_max_v[1], 100),
         }
     # 画等高线
-    C = ax.contourf(true_v, **true_kw)
+    C = ax.contourf(true_v, extent=[0, 250, 0, 50], **true_kw)
     # colorbar 设置，这里我改了，改完之后更好看点
     fig.colorbar(C, ax=ax, fraction=0.01, pad=0.01, orientation='vertical', label='Name [units]')
     # 无用
@@ -271,6 +270,6 @@ def test_plot_data() -> None:
 
 
 if __name__ == "__main__":
-    # test_plot_data()
-    process()
+    test_plot_data()
+    # process()
 
